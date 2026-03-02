@@ -8,12 +8,15 @@ const getProjects = async (req, res) => {
       status,
       search,
       page = 1,
-      limit = 10,
+      limit = 130,
       startingDate,
       endingDate,
     } = req.query;
 
-    let filter = {};
+
+    const filter = {
+      isActive: true,   // ✅ only active projects
+    };
 
     if (status !== undefined) {
       filter.isActive = status === 'true' || status === true;
@@ -69,6 +72,7 @@ const getProject = async (req, res) => {
   }
 };
 
+// Add a new project
 const addProject = async (req, res) => {
   try {
     let formData = { ...req.body, isActive: true };
@@ -113,27 +117,31 @@ const addProject = async (req, res) => {
       }
     }
 
-    // ✅ Initialize arrays before looping
+    // ✅ Initialize image fields
     formData.verticalImages = [];
     formData.horizontalImages = [];
     formData.imageURL = "";
 
-    // ✅ Assign images correctly
-    files.forEach((file) => {
-      switch (file.fieldname) {
-        case "imageURL":
-          formData.imageURL = file.filename;
-          break;
-        case "verticalImages":
-          formData.verticalImages.push(file.filename);
-          break;
-        case "horizontalImages":
-          formData.horizontalImages.push(file.filename);
-          break;
-        default:
-          console.warn(`⚠️ Unknown field: ${file.fieldname}`);
-      }
-    });
+    // ✅ Assign Cloudflare R2 URLs instead of local filenames
+    if (files && files.length > 0) {
+      files.forEach((file) => {
+        const fileUrl = `${process.env.R2_PUBLIC_ENDPOINT}/${encodeURIComponent(file.key)}`;
+
+        switch (file.fieldname) {
+          case "imageURL":
+            formData.imageURL = fileUrl;
+            break;
+          case "verticalImages":
+            formData.verticalImages.push(fileUrl);
+            break;
+          case "horizontalImages":
+            formData.horizontalImages.push(fileUrl);
+            break;
+          default:
+            console.warn(`⚠️ Unknown field: ${file.fieldname}`);
+        }
+      });
+    }
 
     console.log("✅ Final FormData before save:", formData);
 
@@ -152,82 +160,132 @@ const addProject = async (req, res) => {
 
 
 
-// Update a Project
+// Update a project
 const updateProject = async (req, res) => {
   try {
     const { id } = req.params;
-    const formData = req.body;
-    console.log("Updation: ", formData);
+    let formData = req.body;
+
+    console.log("🔹 Received update data:", req.body);
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       throw Error("Invalid ID!!!");
     }
 
-    const files = req?.files;
+    const files = req?.files || [];
 
-    if (files && files.length > 0) {
-      formData.verticalImages = [];
-      formData.horizontalImages = [];
-      formData.imageURL = "";
+    // Find existing project
+    const existingProject = await Project.findById(id);
+    if (!existingProject) throw Error("No Such Project");
 
-      files.map((file) => {
-        if (file.fieldname === "imageURL") {
-          formData.imageURL = file.filename;
-        } else if (file.fieldname === "verticalImages") {
-          formData.verticalImages.push(file.filename);
-        } else if (file.fieldname === "horizontalImages") {
-          formData.horizontalImages.push(file.filename);
+    // Prepare updated data
+    const updatedData = {};
+
+    // ✅ Parse stringified arrays safely
+    const parseArray = (field) => {
+      if (!formData[field]) return [];
+      if (typeof formData[field] === "string") {
+        try {
+          return JSON.parse(formData[field]);
+        } catch {
+          return [formData[field]];
         }
-      });
-
-      if (formData.imageURL === "") {
-        delete formData.imageURL;
       }
+      return formData[field];
+    };
 
-      if (formData.verticalImages.length === 0 || formData.verticalImages === "") {
-        delete formData.verticalImages;
-      }
+    const existingVertical = parseArray("verticalImages");
+    const existingHorizontal = parseArray("horizontalImages");
+    const existingCover = formData.imageURL || existingProject.imageURL;
 
-      if (formData.horizontalImages.length === 0 || formData.horizontalImages === "") {
-        delete formData.horizontalImages;
-      }
-    }
+    // ✅ Handle new uploads
+    const newVertical = [];
+    const newHorizontal = [];
+    let newCover = "";
 
-    if (formData.verticalImages === "") {
-      formData.verticalImages = [];
-    }
+    files.forEach((file) => {
+      const fileUrl = `${process.env.R2_PUBLIC_ENDPOINT}/${encodeURIComponent(file.key)}`;
 
-    if (formData.horizontalImages === "") {
-      formData.horizontalImages = [];
-    }
+      if (file.fieldname === "imageURL") newCover = fileUrl;
+      else if (file.fieldname === "verticalImages") newVertical.push(fileUrl);
+      else if (file.fieldname === "horizontalImages") newHorizontal.push(fileUrl);
+    });
 
-    // Parse category if it's a JSON string
-    if (formData.category && typeof formData.category === 'string') {
+    // ✅ Merge existing + new images
+    updatedData.imageURL = newCover || existingCover || "";
+
+    updatedData.verticalImages = [
+      ...existingVertical,
+      ...newVertical,
+    ].filter(Boolean);
+
+    updatedData.horizontalImages = [
+      ...existingHorizontal,
+      ...newHorizontal,
+    ].filter(Boolean);
+
+    // ✅ If array is empty, that means removed all
+    if (updatedData.verticalImages.length === 0) updatedData.verticalImages = [];
+    if (updatedData.horizontalImages.length === 0) updatedData.horizontalImages = [];
+    if (!updatedData.imageURL) updatedData.imageURL = "";
+
+    // ✅ Parse categories
+    if (formData.categories) {
       try {
-        formData.category = JSON.parse(formData.category);
-      } catch (error) {
-        // If parsing fails, treat as single string
-        formData.category = [formData.category];
+        updatedData.categories = JSON.parse(formData.categories);
+      } catch {
+        updatedData.categories = Array.isArray(formData.categories)
+          ? formData.categories
+          : [formData.categories];
       }
     }
 
-    const project = await Project.findOneAndUpdate(
-      { _id: id },
-      { $set: { ...formData } },
+    // ✅ Copy other fields
+    const textFields = [
+      "name",
+      "slug",
+      "area",
+      "plotArea",
+      "client",
+      "photographer",
+      "location",
+      "architects",
+      "designTeam",
+      "yearOfCompletion",
+      "description",
+      "moreDetails",
+    ];
+
+    textFields.forEach((field) => {
+      if (formData[field] !== undefined) {
+        updatedData[field] = formData[field];
+      }
+    });
+
+    console.log("✅ Final update data:", updatedData);
+
+    // ✅ Save to DB
+    const updatedProject = await Project.findByIdAndUpdate(
+      id,
+      { $set: updatedData },
       { new: true }
     );
 
-    if (!project) {
-      throw Error("No Such Project");
-    }
-
-    res.status(200).json({ project });
+    res.status(200).json({
+      success: true,
+      message: "Project updated successfully",
+      project: updatedProject,
+    });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    console.error("❌ Error updating project:", error);
+    res.status(400).json({ success: false, error: error.message });
   }
 };
 
-// Deleting a Project
+
+
+
+// Soft Deleting a Project
 const deleteProject = async (req, res) => {
   try {
     const { id } = req.params;
@@ -236,17 +294,26 @@ const deleteProject = async (req, res) => {
       throw Error("Invalid ID!!!");
     }
 
-    const project = await Project.findOneAndDelete({ _id: id });
+    // Instead of deleting from DB, mark as inactive
+    const project = await Project.findByIdAndUpdate(
+      id,
+      { isActive: false },
+      { new: true } // returns the updated document
+    );
 
     if (!project) {
       throw Error("No Such Project");
     }
 
-    res.status(200).json({ project });
+    res.status(200).json({
+      message: "Project soft deleted successfully",
+      project,
+    });
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
 };
+
 
 module.exports = {
   getProjects,

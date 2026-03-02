@@ -14,6 +14,20 @@ router.delete("/project/:id", deleteProject);
 router.patch("/project/:id", upload.any(), updateProject);
 router.post("/project", upload.any(), addProject);
 
+const {
+    getProductDesigns,
+    addProductDesign,
+    reorderProductDesigns,
+    deleteProductDesign,
+} = require("../controllers/admin/productDesignController");
+
+
+// Product Designs routes
+router.get("/productDesigns", getProductDesigns);
+router.post("/productDesign", upload.any(), addProductDesign);
+router.patch("/productDesigns/reorder", reorderProductDesigns);
+router.delete("/productDesign/:id", deleteProductDesign);
+
 
 
 module.exports = router;

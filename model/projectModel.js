@@ -59,14 +59,23 @@ const projectsSchema = new Schema(
     },
     moreDetails: {
       type: String,
-      default: '',
     },
+    client: {
+      type: String,
+    },
+    plotArea: {
+      type: String,
+    },
+    photographer: {
+      type: String
+    }
+
   },
   { timestamps: true }
 );
 
 // Pre-save middleware to generate slug
-projectsSchema.pre('save', function(next) {
+projectsSchema.pre('save', function (next) {
   if (this.isModified('name') || this.isNew) {
     this.slug = this.name
       .toLowerCase()
